@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Vectorizer Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-vectorizer-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x900x24" /opt/telegram-vectorizer-bot/.venv/bin/python /opt/telegram-vectorizer-bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

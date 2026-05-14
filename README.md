@@ -50,3 +50,7 @@ O parametro `VECTORIZATION_PROVIDER` no `.env` controla o provedor. Use `vectori
 O parametro `OUTPUT_FORMAT` no `.env` controla o formato de retorno. Com `vectorizer_ai`, use `eps`, `svg`, `pdf`, `dxf` ou `png`. Com `local`, use `eps` ou `svg`.
 
 Os parametros `VTRACER_*` no `.env` controlam qualidade, quantidade de detalhes e velocidade. Para logotipos e artes simples, os valores padrao costumam funcionar bem.
+
+## Deploy em VPS
+
+Para rodar 24/7 em uma VPS Ubuntu, veja `DEPLOY_VPS.md`. O bot usa polling do Telegram, entao nao precisa expor porta HTTP.
