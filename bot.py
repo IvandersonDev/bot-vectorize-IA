@@ -114,6 +114,10 @@ VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS = env_float(
     "VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS",
     90.0,
 )
+VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS = env_float(
+    "VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS",
+    90.0,
+)
 PLAYWRIGHT_AUTO_INSTALL = env_bool("PLAYWRIGHT_AUTO_INSTALL", True)
 VECTORIZER_AI_COOKIE_NAME = os.getenv("VECTORIZER_AI_COOKIE_NAME", "VK").strip() or "VK"
 VECTORIZER_AI_COOKIE_VALUE = os.getenv("VECTORIZER_AI_COOKIE_VALUE", "").strip()
@@ -764,12 +768,22 @@ def wait_for_vectorizer_ai_result(page) -> None:
     retried_network_error = False
     unchanged_processing_checks = 0
     next_error_check = 0.0
+    download_button_without_href_logged = False
 
     while time.monotonic() < deadline:
         if has_visible_vectorizer_ai_download(page):
-            dismiss_vectorizer_ai_blocking_dialogs(page)
-            logger.info("Resultado do Vectorizer.AI pronto; botao Download visivel.")
-            return
+            download_link = page.locator("#App-DownloadLink").first
+            download_url = get_vectorizer_ai_download_url(page, download_link)
+            if download_url:
+                dismiss_vectorizer_ai_blocking_dialogs(page)
+                logger.info("Resultado do Vectorizer.AI pronto; link Download tokenizado visivel.")
+                return
+
+            if not download_button_without_href_logged:
+                download_button_without_href_logged = True
+                logger.info(
+                    "Botao Download visivel, aguardando href tokenizado antes de clicar."
+                )
 
         body_text = ""
         now = time.monotonic()
@@ -787,24 +801,18 @@ def wait_for_vectorizer_ai_result(page) -> None:
             "Connect to worker",
             "Unable to connect to the worker",
             "Failed to connect to the server",
+            "Muitas solicita",
+            "Too many",
+            "slow down",
         ]
         if any(marker in body_text for marker in network_error_markers):
-            last_error = "O Vectorizer.AI mostrou erro de rede durante o processamento."
+            last_error = "O Vectorizer.AI mostrou erro durante o processamento/download."
             retry_now = page.locator("#RetryDialog-RetryNowButton")
             if not retried_network_error and retry_now.count() > 0 and retry_now.first.is_visible():
                 retried_network_error = True
                 retry_now.first.click(timeout=1_000)
             page.wait_for_timeout(500)
             continue
-
-        download_link = page.locator("#App-DownloadLink")
-        if (
-            download_link.count() > 0
-            and download_link.first.is_visible()
-            and "Original" in body_text
-            and "Saída" in body_text
-        ):
-            return
 
         if page.url.endswith("/images/processing") or "/images/processing" in page.url:
             unchanged_processing_checks += 1
@@ -1278,12 +1286,12 @@ def click_vectorizer_ai_result_download(page, locator):
         downloads.append(download)
 
     page.on("download", on_download)
-    logger.info("Clicando no primeiro Download do Vectorizer.AI.")
+    logger.info("Aguardando href tokenizado do primeiro Download do Vectorizer.AI.")
     try:
         download_url = wait_for_vectorizer_ai_download_url(
             page,
             locator,
-            timeout_ms=5_000,
+            timeout_ms=int(VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS * 1000),
         )
         if download_url:
             resolved_page, download = open_vectorizer_ai_download_url(
@@ -1295,6 +1303,7 @@ def click_vectorizer_ai_result_download(page, locator):
             if resolved_page is not None or download is not None:
                 return resolved_page or page, download
 
+        logger.info("Href tokenizado nao apareceu; tentando clique normal no Download.")
         click_locator_like_user(page, locator, timeout=3_000)
         resolved_page, download = first_download_wait(
             page,
@@ -1304,34 +1313,6 @@ def click_vectorizer_ai_result_download(page, locator):
         )
         if resolved_page is not None or download is not None:
             return resolved_page or page, download
-
-        logger.info("Primeiro clique nao abriu as opcoes; tentando clique forcado.")
-        try:
-            locator.click(force=True, timeout=2_000)
-            resolved_page, download = first_download_wait(
-                page,
-                pages_before,
-                downloads,
-                timeout_seconds=3,
-            )
-            if resolved_page is not None or download is not None:
-                return resolved_page or page, download
-        except PlaywrightError:
-            pass
-
-        logger.info("Clique forcado nao abriu as opcoes; tentando clique via JS.")
-        try:
-            locator.evaluate("(element) => element.click()")
-            resolved_page, download = first_download_wait(
-                page,
-                pages_before,
-                downloads,
-                timeout_seconds=3,
-            )
-            if resolved_page is not None or download is not None:
-                return resolved_page or page, download
-        except PlaywrightError:
-            pass
 
         logger.info(
             "Primeiro clique nao abriu as opcoes; tentando href tokenizado do botao."

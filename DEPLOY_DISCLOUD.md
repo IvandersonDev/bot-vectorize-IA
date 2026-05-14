@@ -39,12 +39,13 @@ VECTORIZER_AI_INPUT_MAX_PIXELS=3000000
 VECTORIZER_AI_OFFSCREEN_PROCESSING=false
 VECTORIZER_AI_FINAL_DOWNLOAD_DELAY_SECONDS=0
 VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS=90
+VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS=90
 PLAYWRIGHT_AUTO_INSTALL=true
 VECTORIZER_AI_COOKIE_NAME=VK
-VECTORIZER_AI_COOKIE_VALUE=COLE_O_COOKIE_VK_AQUI
+VECTORIZER_AI_COOKIE_VALUE=
 VECTORIZER_AI_COOKIE_DOMAIN=.vectorizer.ai
 VECTORIZER_AI_COOKIE_HEADER=
-VECTORIZER_AI_COOKIES_JSON=
+VECTORIZER_AI_COOKIES_JSON=COLE_A_LINHA_EXPORTADA_AQUI
 VECTORIZER_AI_COOKIES_FILE=
 ```
 
@@ -52,7 +53,7 @@ Nao cole aspas. Nao coloque o token no GitHub.
 
 Se a Discloud nao baixar o Chromium durante o build, `PLAYWRIGHT_AUTO_INSTALL=true` faz o bot baixar automaticamente na primeira tentativa de abrir o navegador.
 
-O cookie de login principal do Vectorizer.AI e o `VK`. Na Discloud, coloque o valor em `VECTORIZER_AI_COOKIE_VALUE`. Se precisar enviar mais cookies, use `VECTORIZER_AI_COOKIE_HEADER` no formato `VK=valor; atk=valor`.
+O jeito mais confiavel e usar `VECTORIZER_AI_COOKIES_JSON`, porque ele leva o `VK` e os cookies auxiliares do Vectorizer.AI juntos. Deixe `VECTORIZER_AI_COOKIE_VALUE` vazio quando usar o JSON completo.
 
 Para usar todos os cookies do perfil local, rode `python scripts/export_vectorizer_ai_cookies.py` no seu PC com o bot parado. Ele gera `.vectorizer-ai-cookies.env`; cole a linha `VECTORIZER_AI_COOKIES_JSON=...` nas variaveis da Discloud.
 
