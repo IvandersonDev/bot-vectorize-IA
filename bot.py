@@ -506,7 +506,11 @@ def convert_svg_to_eps(svg_path: Path, eps_path: Path) -> None:
 
 def launch_vectorizer_ai_context(playwright, *, login: bool = False):
     VECTORIZER_AI_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    args = ["--disable-blink-features=AutomationControlled"]
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
     if not login and VECTORIZER_AI_OFFSCREEN_PROCESSING and not VECTORIZER_AI_HEADLESS:
         args.extend(["--window-position=-32000,-32000", "--window-size=1280,900"])
 
@@ -1004,17 +1008,95 @@ def first_download_wait(page, pages_before, downloads, timeout_seconds: float):
     return None, None
 
 
-def open_vectorizer_ai_download_href(page, locator, pages_before, downloads):
+def normalize_vectorizer_ai_download_url(page, value: str | None) -> str | None:
+    if not value:
+        return None
+
+    download_url = urljoin(page.url, value.strip())
+    if "/assets/" in download_url or "/images/download" in download_url:
+        return None
+    if re.search(r"/images/[0-9A-Za-z][0-9A-Za-z_-]{20,}", download_url):
+        return download_url
+
+    return None
+
+
+def get_vectorizer_ai_download_url(page, locator=None) -> str | None:
+    if locator is not None:
+        for attribute in ("href", "data-href"):
+            try:
+                download_url = normalize_vectorizer_ai_download_url(
+                    page,
+                    locator.get_attribute(attribute, timeout=500),
+                )
+                if download_url:
+                    return download_url
+            except PlaywrightError:
+                pass
+
     try:
-        href = locator.get_attribute("href", timeout=1_000)
+        candidates = page.evaluate(
+            """
+            () => {
+                const values = [];
+                const push = (value) => {
+                    if (value) values.push(String(value));
+                };
+
+                for (const selector of [
+                    '#App-DownloadLink',
+                    'a[alt="Download"]',
+                    'a[title="Download"]',
+                    'a[href*="/images/"]'
+                ]) {
+                    for (const element of document.querySelectorAll(selector)) {
+                        push(element.getAttribute('href'));
+                        push(element.href);
+                        push(element.getAttribute('data-href'));
+                    }
+                }
+
+                const html = document.documentElement.outerHTML;
+                const matches = html.match(/(?:https?:\\/\\/[^"'\\s<>]+)?\\/images\\/[0-9A-Za-z][0-9A-Za-z_-]{20,}/g) || [];
+                for (const match of matches) push(match);
+
+                for (const storage of [window.localStorage, window.sessionStorage]) {
+                    try {
+                        for (let index = 0; index < storage.length; index += 1) {
+                            const key = storage.key(index);
+                            push(key);
+                            push(storage.getItem(key));
+                        }
+                    } catch (_) {}
+                }
+
+                return values;
+            }
+            """
+        )
     except PlaywrightError:
-        href = None
+        return None
 
-    if not href or href == "#":
-        logger.info("Botao Download do Vectorizer.AI nao trouxe href tokenizado.")
-        return page, None
+    for candidate in candidates:
+        download_url = normalize_vectorizer_ai_download_url(page, candidate)
+        if download_url:
+            return download_url
 
-    download_url = urljoin(page.url, href)
+    return None
+
+
+def wait_for_vectorizer_ai_download_url(page, locator=None, timeout_ms: int = 10_000) -> str | None:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        download_url = get_vectorizer_ai_download_url(page, locator)
+        if download_url:
+            return download_url
+        page.wait_for_timeout(250)
+
+    return None
+
+
+def open_vectorizer_ai_download_url(page, download_url, pages_before, downloads):
     logger.info("Abrindo href real do Download do Vectorizer.AI: %s", download_url)
 
     try:
@@ -1035,6 +1117,24 @@ def open_vectorizer_ai_download_href(page, locator, pages_before, downloads):
     return page, None
 
 
+def open_vectorizer_ai_download_href(page, locator, pages_before, downloads):
+    download_url = wait_for_vectorizer_ai_download_url(page, locator, timeout_ms=8_000)
+    if download_url:
+        return open_vectorizer_ai_download_url(page, download_url, pages_before, downloads)
+
+    try:
+        href = locator.get_attribute("href", timeout=1_000)
+    except PlaywrightError:
+        href = None
+
+    download_url = normalize_vectorizer_ai_download_url(page, href)
+    if not download_url:
+        logger.info("Botao Download do Vectorizer.AI nao trouxe href tokenizado.")
+        return page, None
+
+    return open_vectorizer_ai_download_url(page, download_url, pages_before, downloads)
+
+
 def click_vectorizer_ai_result_download(page, locator):
     pages_before = set(page.context.pages)
     downloads = []
@@ -1045,6 +1145,21 @@ def click_vectorizer_ai_result_download(page, locator):
     page.on("download", on_download)
     logger.info("Clicando no primeiro Download do Vectorizer.AI.")
     try:
+        download_url = wait_for_vectorizer_ai_download_url(
+            page,
+            locator,
+            timeout_ms=5_000,
+        )
+        if download_url:
+            resolved_page, download = open_vectorizer_ai_download_url(
+                page,
+                download_url,
+                pages_before,
+                downloads,
+            )
+            if resolved_page is not None or download is not None:
+                return resolved_page or page, download
+
         click_locator_like_user(page, locator, timeout=3_000)
         resolved_page, download = first_download_wait(
             page,
@@ -1054,6 +1169,34 @@ def click_vectorizer_ai_result_download(page, locator):
         )
         if resolved_page is not None or download is not None:
             return resolved_page or page, download
+
+        logger.info("Primeiro clique nao abriu as opcoes; tentando clique forcado.")
+        try:
+            locator.click(force=True, timeout=2_000)
+            resolved_page, download = first_download_wait(
+                page,
+                pages_before,
+                downloads,
+                timeout_seconds=3,
+            )
+            if resolved_page is not None or download is not None:
+                return resolved_page or page, download
+        except PlaywrightError:
+            pass
+
+        logger.info("Clique forcado nao abriu as opcoes; tentando clique via JS.")
+        try:
+            locator.evaluate("(element) => element.click()")
+            resolved_page, download = first_download_wait(
+                page,
+                pages_before,
+                downloads,
+                timeout_seconds=3,
+            )
+            if resolved_page is not None or download is not None:
+                return resolved_page or page, download
+        except PlaywrightError:
+            pass
 
         logger.info(
             "Primeiro clique nao abriu as opcoes; tentando href tokenizado do botao."
