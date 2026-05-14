@@ -5,6 +5,8 @@ __pycache__/
 *.py[cod]
 logs/
 .vectorizer-ai-profile/
+.vectorizer-ai-cookies.env
+.vectorizer-ai-cookies.json
 tmp-*/
 *.download
 .pytest_cache/

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import mimetypes
@@ -26,7 +27,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(dotenv_path=BASE_DIR / ".env", encoding="utf-8-sig")
+load_dotenv(dotenv_path=BASE_DIR / ".env", encoding="utf-8-sig", override=True)
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -121,6 +122,8 @@ VECTORIZER_AI_COOKIE_DOMAIN = (
     or ".vectorizer.ai"
 )
 VECTORIZER_AI_COOKIE_HEADER = os.getenv("VECTORIZER_AI_COOKIE_HEADER", "").strip()
+VECTORIZER_AI_COOKIES_JSON = os.getenv("VECTORIZER_AI_COOKIES_JSON", "").strip()
+VECTORIZER_AI_COOKIES_FILE = os.getenv("VECTORIZER_AI_COOKIES_FILE", "").strip()
 VECTORIZER_AI_LOCK = threading.Lock()
 
 VTRACER_INPUT_MAX_PIXELS = env_int("VTRACER_INPUT_MAX_PIXELS", 6_000_000)
@@ -608,12 +611,91 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-def vectorizer_ai_cookies_from_env() -> list[dict[str, object]]:
-    raw_cookies = parse_cookie_header(VECTORIZER_AI_COOKIE_HEADER)
-    if VECTORIZER_AI_COOKIE_VALUE:
-        raw_cookies[VECTORIZER_AI_COOKIE_NAME] = VECTORIZER_AI_COOKIE_VALUE
+def load_cookie_payload(raw_payload: str, source: str) -> list[dict[str, object]]:
+    if not raw_payload:
+        return []
+
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        logger.warning("Cookies JSON do Vectorizer.AI invalidos em %s: %s", source, exc)
+        return []
+
+    if isinstance(payload, dict):
+        payload = payload.get("cookies", [])
+
+    if not isinstance(payload, list):
+        logger.warning("Cookies JSON do Vectorizer.AI em %s nao e uma lista.", source)
+        return []
 
     cookies = []
+    for cookie in payload:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name", "")).strip()
+        value = str(cookie.get("value", "")).strip()
+        if not name or not value:
+            continue
+
+        normalized = {
+            "name": name,
+            "value": value,
+            "path": str(cookie.get("path") or "/"),
+            "secure": bool(cookie.get("secure", True)),
+            "httpOnly": bool(cookie.get("httpOnly", name.lower() in {"vk", "atk"})),
+            "sameSite": cookie.get("sameSite") or "Lax",
+        }
+
+        if cookie.get("domain"):
+            normalized["domain"] = str(cookie["domain"])
+        elif cookie.get("url"):
+            normalized["url"] = str(cookie["url"])
+        else:
+            normalized["domain"] = VECTORIZER_AI_COOKIE_DOMAIN
+
+        if cookie.get("expires") not in {None, -1}:
+            try:
+                normalized["expires"] = float(cookie["expires"])
+            except (TypeError, ValueError):
+                pass
+
+        cookies.append(normalized)
+
+    return cookies
+
+
+def vectorizer_ai_json_cookies_from_env() -> list[dict[str, object]]:
+    cookies = load_cookie_payload(VECTORIZER_AI_COOKIES_JSON, "VECTORIZER_AI_COOKIES_JSON")
+
+    if VECTORIZER_AI_COOKIES_FILE:
+        cookie_path = Path(VECTORIZER_AI_COOKIES_FILE)
+        if not cookie_path.is_absolute():
+            cookie_path = BASE_DIR / cookie_path
+        try:
+            cookies.extend(
+                load_cookie_payload(
+                    cookie_path.read_text(encoding="utf-8-sig"),
+                    str(cookie_path),
+                )
+            )
+        except FileNotFoundError:
+            logger.warning("Arquivo de cookies do Vectorizer.AI nao encontrado: %s", cookie_path)
+        except OSError as exc:
+            logger.warning("Nao consegui ler arquivo de cookies do Vectorizer.AI %s: %s", cookie_path, exc)
+
+    return cookies
+
+
+def vectorizer_ai_cookies_from_env() -> list[dict[str, object]]:
+    cookies = vectorizer_ai_json_cookies_from_env()
+    raw_cookies = parse_cookie_header(VECTORIZER_AI_COOKIE_HEADER)
+    if VECTORIZER_AI_COOKIE_VALUE:
+        value_cookies = parse_cookie_header(VECTORIZER_AI_COOKIE_VALUE)
+        if value_cookies:
+            raw_cookies.update(value_cookies)
+        else:
+            raw_cookies[VECTORIZER_AI_COOKIE_NAME] = VECTORIZER_AI_COOKIE_VALUE
+
     for name, value in raw_cookies.items():
         cookies.append(
             {
@@ -633,6 +715,7 @@ def vectorizer_ai_cookies_from_env() -> list[dict[str, object]]:
 def apply_vectorizer_ai_cookies(context) -> None:
     cookies = vectorizer_ai_cookies_from_env()
     if not cookies:
+        logger.info("Nenhum cookie do Vectorizer.AI configurado no ambiente.")
         return
 
     context.add_cookies(cookies)
