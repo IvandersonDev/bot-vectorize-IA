@@ -769,6 +769,7 @@ def wait_for_vectorizer_ai_result(page) -> None:
     next_error_check = 0.0
     download_button_without_href_logged = False
     download_link_deadline = None
+    setattr(page, "_vectorizer_ai_download_link_waited", False)
 
     while time.monotonic() < deadline:
         now = time.monotonic()
@@ -795,11 +796,12 @@ def wait_for_vectorizer_ai_result(page) -> None:
 
             if now >= download_link_deadline:
                 save_vectorizer_ai_debug(page, "download-link-timeout")
-                raise RuntimeError(
-                    "O Vectorizer.AI mostrou o botao Download, mas nao liberou o "
-                    "link real do arquivo no tempo esperado. Confira se a conta "
-                    "logada pelo cookie tem permissao para download."
+                setattr(page, "_vectorizer_ai_download_link_waited", True)
+                logger.info(
+                    "Href tokenizado nao apareceu no tempo esperado; "
+                    "prosseguindo com clique normal no Download."
                 )
+                return
         else:
             download_link_deadline = None
 
@@ -1291,22 +1293,26 @@ def click_vectorizer_ai_result_download(page, locator):
         downloads.append(download)
 
     page.on("download", on_download)
-    logger.info("Aguardando href tokenizado do primeiro Download do Vectorizer.AI.")
     try:
-        download_url = wait_for_vectorizer_ai_download_url(
-            page,
-            locator,
-            timeout_ms=int(VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS * 1000),
+        download_url_already_waited = bool(
+            getattr(page, "_vectorizer_ai_download_link_waited", False)
         )
-        if download_url:
-            resolved_page, download = open_vectorizer_ai_download_url(
+        if not download_url_already_waited:
+            logger.info("Aguardando href tokenizado do primeiro Download do Vectorizer.AI.")
+            download_url = wait_for_vectorizer_ai_download_url(
                 page,
-                download_url,
-                pages_before,
-                downloads,
+                locator,
+                timeout_ms=int(VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS * 1000),
             )
-            if resolved_page is not None or download is not None:
-                return resolved_page or page, download
+            if download_url:
+                resolved_page, download = open_vectorizer_ai_download_url(
+                    page,
+                    download_url,
+                    pages_before,
+                    downloads,
+                )
+                if resolved_page is not None or download is not None:
+                    return resolved_page or page, download
 
         logger.info("Href tokenizado nao apareceu; tentando clique normal no Download.")
         click_locator_like_user(page, locator, timeout=3_000)
@@ -1314,7 +1320,7 @@ def click_vectorizer_ai_result_download(page, locator):
             page,
             pages_before,
             downloads,
-            timeout_seconds=3,
+            timeout_seconds=15,
         )
         if resolved_page is not None or download is not None:
             return resolved_page or page, download
