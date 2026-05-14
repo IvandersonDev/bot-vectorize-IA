@@ -54,3 +54,7 @@ Os parametros `VTRACER_*` no `.env` controlam qualidade, quantidade de detalhes 
 ## Deploy em VPS
 
 Para rodar 24/7 em uma VPS Ubuntu, veja `DEPLOY_VPS.md`. O bot usa polling do Telegram, entao nao precisa expor porta HTTP.
+
+## Deploy na Discloud
+
+Para subir pela tela GitHub da Discloud, veja `DEPLOY_DISCLOUD.md`. O arquivo `discloud.config` ja esta na raiz do projeto.
