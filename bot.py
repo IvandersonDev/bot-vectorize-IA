@@ -114,6 +114,13 @@ VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS = env_float(
     90.0,
 )
 PLAYWRIGHT_AUTO_INSTALL = env_bool("PLAYWRIGHT_AUTO_INSTALL", True)
+VECTORIZER_AI_COOKIE_NAME = os.getenv("VECTORIZER_AI_COOKIE_NAME", "VK").strip() or "VK"
+VECTORIZER_AI_COOKIE_VALUE = os.getenv("VECTORIZER_AI_COOKIE_VALUE", "").strip()
+VECTORIZER_AI_COOKIE_DOMAIN = (
+    os.getenv("VECTORIZER_AI_COOKIE_DOMAIN", ".vectorizer.ai").strip()
+    or ".vectorizer.ai"
+)
+VECTORIZER_AI_COOKIE_HEADER = os.getenv("VECTORIZER_AI_COOKIE_HEADER", "").strip()
 VECTORIZER_AI_LOCK = threading.Lock()
 
 VTRACER_INPUT_MAX_PIXELS = env_int("VTRACER_INPUT_MAX_PIXELS", 6_000_000)
@@ -586,6 +593,51 @@ def install_playwright_chromium() -> None:
         )
 
     logger.info("Chromium do Playwright instalado.")
+
+
+def parse_cookie_header(cookie_header: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in cookie_header.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if name and value:
+            cookies[name] = value
+    return cookies
+
+
+def vectorizer_ai_cookies_from_env() -> list[dict[str, object]]:
+    raw_cookies = parse_cookie_header(VECTORIZER_AI_COOKIE_HEADER)
+    if VECTORIZER_AI_COOKIE_VALUE:
+        raw_cookies[VECTORIZER_AI_COOKIE_NAME] = VECTORIZER_AI_COOKIE_VALUE
+
+    cookies = []
+    for name, value in raw_cookies.items():
+        cookies.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": VECTORIZER_AI_COOKIE_DOMAIN,
+                "path": "/",
+                "secure": True,
+                "httpOnly": name.lower() in {"vk", "atk"},
+                "sameSite": "Lax",
+            }
+        )
+
+    return cookies
+
+
+def apply_vectorizer_ai_cookies(context) -> None:
+    cookies = vectorizer_ai_cookies_from_env()
+    if not cookies:
+        return
+
+    context.add_cookies(cookies)
+    cookie_names = ", ".join(cookie["name"] for cookie in cookies)
+    logger.info("Cookies do Vectorizer.AI aplicados via ambiente: %s.", cookie_names)
 
 
 def has_visible_vectorizer_ai_download(page) -> bool:
@@ -1413,6 +1465,7 @@ def vectorize_with_vectorizer_ai(input_path: Path, output_path: Path) -> None:
         with sync_playwright() as playwright:
             context = launch_vectorizer_ai_context(playwright)
             try:
+                apply_vectorizer_ai_cookies(context)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(30_000)
                 page.goto(VECTORIZER_AI_URL, wait_until="domcontentloaded", timeout=60_000)
@@ -1453,6 +1506,7 @@ def open_vectorizer_ai_login_session() -> None:
         with sync_playwright() as playwright:
             context = launch_vectorizer_ai_context(playwright, login=True)
             try:
+                apply_vectorizer_ai_cookies(context)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(VECTORIZER_AI_URL, wait_until="domcontentloaded", timeout=60_000)
 
