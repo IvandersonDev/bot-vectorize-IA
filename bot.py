@@ -119,6 +119,10 @@ VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS = env_float(
     90.0,
 )
 VECTORIZER_AI_VERBOSE_LOGS = env_bool("VECTORIZER_AI_VERBOSE_LOGS", True)
+VECTORIZER_AI_NETWORK_ERROR_TIMEOUT_SECONDS = env_float(
+    "VECTORIZER_AI_NETWORK_ERROR_TIMEOUT_SECONDS",
+    45.0,
+)
 PLAYWRIGHT_AUTO_INSTALL = env_bool("PLAYWRIGHT_AUTO_INSTALL", True)
 VECTORIZER_AI_COOKIE_NAME = os.getenv("VECTORIZER_AI_COOKIE_NAME", "VK").strip() or "VK"
 VECTORIZER_AI_COOKIE_VALUE = os.getenv("VECTORIZER_AI_COOKIE_VALUE", "").strip()
@@ -601,6 +605,129 @@ def save_vectorizer_ai_debug(page, prefix: str) -> None:
         logger.exception("Nao consegui salvar screenshot de debug do Vectorizer.AI.")
 
 
+def compact_log_text(value: str, limit: int = 700) -> str:
+    compacted = re.sub(r"\s+", " ", value or "").strip()
+    if len(compacted) <= limit:
+        return compacted
+    return compacted[: limit - 3].rstrip() + "..."
+
+
+def extract_vectorizer_ai_error_text(page) -> str:
+    try:
+        text = page.evaluate(
+            """
+            () => {
+                const selectors = [
+                    '#RetryDialog-Dialog',
+                    '#App-Error-Dialog',
+                    '[role="dialog"]',
+                    '.modal',
+                    '.alert',
+                    '.error',
+                    '.Error',
+                    '.text-danger',
+                    '.TaskStatus',
+                    '.TaskStatus-error'
+                ];
+                const parts = [];
+                for (const selector of selectors) {
+                    for (const element of document.querySelectorAll(selector)) {
+                        const style = window.getComputedStyle(element);
+                        const box = element.getBoundingClientRect();
+                        const visible = style.display !== 'none' &&
+                            style.visibility !== 'hidden' &&
+                            box.width > 0 &&
+                            box.height > 0;
+                        const text = (element.innerText || element.textContent || '').trim();
+                        if (visible && text) {
+                            parts.push(text);
+                        }
+                    }
+                }
+                return Array.from(new Set(parts)).join(' | ');
+            }
+            """
+        )
+    except PlaywrightError:
+        text = ""
+
+    if text:
+        return compact_log_text(text)
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=1_000)
+    except PlaywrightError:
+        return ""
+
+    markers = [
+        "Erro de rede",
+        "Tarefa\tErro",
+        "Network Error",
+        "Connect to worker",
+        "Unable to connect to the worker",
+        "Failed to connect to the server",
+        "Muitas solicita",
+        "Too many",
+        "slow down",
+    ]
+    for marker in markers:
+        index = body_text.find(marker)
+        if index >= 0:
+            start = max(0, index - 220)
+            end = min(len(body_text), index + 500)
+            return compact_log_text(body_text[start:end])
+
+    return compact_log_text(body_text)
+
+
+def click_vectorizer_ai_retry(page) -> bool:
+    selectors = [
+        "#RetryDialog-RetryNowButton",
+        "#App-Error-Dialog button",
+        "[role='dialog'] button:has-text('Tentar novamente')",
+        "[role='dialog'] button:has-text('Tente novamente')",
+        "[role='dialog'] button:has-text('Retry')",
+        "[role='dialog'] button:has-text('Try again')",
+        "button:has-text('Tentar novamente')",
+        "button:has-text('Tente novamente')",
+        "button:has-text('Retry')",
+        "button:has-text('Try again')",
+        "a:has-text('Tentar novamente')",
+        "a:has-text('Tente novamente')",
+        "a:has-text('Retry')",
+        "a:has-text('Try again')",
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            count = locator.count()
+        except PlaywrightError:
+            continue
+
+        if count == 0:
+            continue
+
+        logger.info(
+            "Vectorizer.AI: candidato de retry encontrado (%s elemento[s]): %s",
+            count,
+            selector,
+        )
+        for index in range(count):
+            target = locator.nth(index)
+            try:
+                if not target.is_visible(timeout=300):
+                    continue
+                target.click(timeout=1_500)
+                logger.info("Vectorizer.AI: cliquei no retry com seletor: %s", selector)
+                return True
+            except PlaywrightError:
+                continue
+
+    logger.info("Vectorizer.AI: nenhum botao de retry visivel encontrado.")
+    return False
+
+
 def log_vectorizer_ai_state(page, stage: str) -> None:
     if not VECTORIZER_AI_VERBOSE_LOGS:
         return
@@ -894,6 +1021,9 @@ def wait_for_vectorizer_ai_result(page) -> None:
     setattr(page, "_vectorizer_ai_download_link_waited", False)
     last_logged_url = None
     next_wait_log = time.monotonic() + 10.0
+    network_error_started_at = None
+    network_error_logged_detail = ""
+    network_error_debug_saved = False
 
     while time.monotonic() < deadline:
         now = time.monotonic()
@@ -964,12 +1094,43 @@ def wait_for_vectorizer_ai_result(page) -> None:
         ]
         if any(marker in body_text for marker in network_error_markers):
             last_error = "O Vectorizer.AI mostrou erro durante o processamento/download."
-            retry_now = page.locator("#RetryDialog-RetryNowButton")
-            if not retried_network_error and retry_now.count() > 0 and retry_now.first.is_visible():
+            if network_error_started_at is None:
+                network_error_started_at = now
+
+            error_detail = extract_vectorizer_ai_error_text(page)
+            if error_detail and error_detail != network_error_logged_detail:
+                network_error_logged_detail = error_detail
+                logger.warning(
+                    "Vectorizer.AI: erro detectado na tela de processamento: %s",
+                    error_detail,
+                )
+
+            if not network_error_debug_saved:
+                network_error_debug_saved = True
+                save_vectorizer_ai_debug(page, "network-error-processing")
+
+            if not retried_network_error and click_vectorizer_ai_retry(page):
                 retried_network_error = True
-                retry_now.first.click(timeout=1_000)
-            page.wait_for_timeout(500)
+                network_error_started_at = None
+                page.wait_for_timeout(3_000)
+                log_vectorizer_ai_state(page, "apos-retry-erro-rede")
+                continue
+
+            if (
+                network_error_started_at is not None
+                and now - network_error_started_at >= VECTORIZER_AI_NETWORK_ERROR_TIMEOUT_SECONDS
+            ):
+                save_vectorizer_ai_debug(page, "network-error-timeout")
+                raise RuntimeError(
+                    "O Vectorizer.AI recebeu a imagem, mas ficou em erro de rede "
+                    "durante o processamento no navegador da hospedagem. Detalhe: "
+                    f"{(error_detail or last_error)[:500]}"
+                )
+
+            page.wait_for_timeout(1_000)
             continue
+        else:
+            network_error_started_at = None
 
         page.wait_for_timeout(250)
 
