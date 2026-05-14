@@ -766,12 +766,20 @@ def wait_for_vectorizer_ai_result(page) -> None:
     deadline = time.monotonic() + VECTORIZER_AI_TIMEOUT_SECONDS
     last_error = ""
     retried_network_error = False
-    unchanged_processing_checks = 0
     next_error_check = 0.0
     download_button_without_href_logged = False
+    download_link_deadline = None
 
     while time.monotonic() < deadline:
-        if has_visible_vectorizer_ai_download(page):
+        now = time.monotonic()
+        download_button_visible = has_visible_vectorizer_ai_download(page)
+        if download_button_visible:
+            if download_link_deadline is None:
+                download_link_deadline = now + max(
+                    VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS,
+                    1.0,
+                )
+
             download_link = page.locator("#App-DownloadLink").first
             download_url = get_vectorizer_ai_download_url(page, download_link)
             if download_url:
@@ -785,8 +793,17 @@ def wait_for_vectorizer_ai_result(page) -> None:
                     "Botao Download visivel, aguardando href tokenizado antes de clicar."
                 )
 
+            if now >= download_link_deadline:
+                save_vectorizer_ai_debug(page, "download-link-timeout")
+                raise RuntimeError(
+                    "O Vectorizer.AI mostrou o botao Download, mas nao liberou o "
+                    "link real do arquivo no tempo esperado. Confira se a conta "
+                    "logada pelo cookie tem permissao para download."
+                )
+        else:
+            download_link_deadline = None
+
         body_text = ""
-        now = time.monotonic()
         if now >= next_error_check:
             next_error_check = now + 2.0
             try:
@@ -813,18 +830,6 @@ def wait_for_vectorizer_ai_result(page) -> None:
                 retry_now.first.click(timeout=1_000)
             page.wait_for_timeout(500)
             continue
-
-        if page.url.endswith("/images/processing") or "/images/processing" in page.url:
-            unchanged_processing_checks += 1
-            if VECTORIZER_AI_HEADLESS and unchanged_processing_checks >= 45:
-                save_vectorizer_ai_debug(page, "headless-processing-stalled")
-                raise RuntimeError(
-                    "o Vectorizer.AI ficou preso em processamento no modo headless. "
-                    "Esse site falhou nos testes em headless; use "
-                    "VECTORIZER_AI_HEADLESS=false com VECTORIZER_AI_OFFSCREEN_PROCESSING=true."
-                )
-        else:
-            unchanged_processing_checks = 0
 
         page.wait_for_timeout(250)
 
