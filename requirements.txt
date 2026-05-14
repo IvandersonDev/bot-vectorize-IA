@@ -3,3 +3,4 @@ python-dotenv>=1.0.1,<2.0.0
 Pillow>=11.0.0,<13.0.0
 vtracer>=0.6.0,<1.0.0
 playwright>=1.56.0,<2.0.0
+requests>=2.32.0,<3.0.0

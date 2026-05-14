@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urljoin
 
+import requests
 import vtracer
 from dotenv import load_dotenv
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -85,13 +86,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_MAX_FILE_MB = env_int("TELEGRAM_MAX_FILE_MB", 20)
 MAX_FILE_BYTES = TELEGRAM_MAX_FILE_MB * 1024 * 1024
 TELEGRAM_TIMEOUT_SECONDS = env_float("TELEGRAM_TIMEOUT_SECONDS", 180.0)
-VECTORIZATION_PROVIDER = os.getenv("VECTORIZATION_PROVIDER", "vectorizer_ai").strip().lower()
-if VECTORIZATION_PROVIDER not in {"vectorizer_ai", "local"}:
+VECTORIZATION_PROVIDER = os.getenv("VECTORIZATION_PROVIDER", "vectorizer_ai_api").strip().lower()
+if VECTORIZATION_PROVIDER not in {"vectorizer_ai", "vectorizer_ai_api", "local"}:
     logger.warning(
-        "Provedor invalido VECTORIZATION_PROVIDER=%r. Usando vectorizer_ai.",
+        "Provedor invalido VECTORIZATION_PROVIDER=%r. Usando vectorizer_ai_api.",
         VECTORIZATION_PROVIDER,
     )
-    VECTORIZATION_PROVIDER = "vectorizer_ai"
+    VECTORIZATION_PROVIDER = "vectorizer_ai_api"
 
 OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "eps").strip().lower()
 if OUTPUT_FORMAT not in {"eps", "svg", "pdf", "dxf", "png"}:
@@ -134,6 +135,20 @@ VECTORIZER_AI_COOKIE_HEADER = os.getenv("VECTORIZER_AI_COOKIE_HEADER", "").strip
 VECTORIZER_AI_COOKIES_JSON = os.getenv("VECTORIZER_AI_COOKIES_JSON", "").strip()
 VECTORIZER_AI_COOKIES_FILE = os.getenv("VECTORIZER_AI_COOKIES_FILE", "").strip()
 VECTORIZER_AI_LOCK = threading.Lock()
+VECTORIZER_AI_API_URL = os.getenv(
+    "VECTORIZER_AI_API_URL",
+    "https://api.vectorizer.ai/api/v1/vectorize",
+).strip()
+VECTORIZER_AI_API_ID = os.getenv("VECTORIZER_AI_API_ID", "").strip()
+VECTORIZER_AI_API_SECRET = os.getenv("VECTORIZER_AI_API_SECRET", "").strip()
+VECTORIZER_AI_API_MODE = os.getenv("VECTORIZER_AI_API_MODE", "production").strip().lower()
+if VECTORIZER_AI_API_MODE not in {"production", "preview", "test", "test_preview"}:
+    logger.warning(
+        "Modo invalido VECTORIZER_AI_API_MODE=%r. Usando production.",
+        VECTORIZER_AI_API_MODE,
+    )
+    VECTORIZER_AI_API_MODE = "production"
+VECTORIZER_AI_API_TIMEOUT_SECONDS = env_float("VECTORIZER_AI_API_TIMEOUT_SECONDS", 300.0)
 
 VTRACER_INPUT_MAX_PIXELS = env_int("VTRACER_INPUT_MAX_PIXELS", 6_000_000)
 VTRACER_COLORMODE = os.getenv("VTRACER_COLORMODE", "color")
@@ -1949,6 +1964,62 @@ def validate_vectorizer_ai_download(output_path: Path, suggested_filename: str) 
         )
 
 
+def vectorize_with_vectorizer_ai_api(input_path: Path, output_path: Path) -> None:
+    if not VECTORIZER_AI_API_ID or not VECTORIZER_AI_API_SECRET:
+        raise RuntimeError(
+            "Configure VECTORIZER_AI_API_ID e VECTORIZER_AI_API_SECRET no .env "
+            "para usar VECTORIZATION_PROVIDER=vectorizer_ai_api."
+        )
+
+    logger.info(
+        "Vectorizer.AI API: enviando %s para %s com saida %s.",
+        describe_image_file(input_path),
+        VECTORIZER_AI_API_URL,
+        OUTPUT_LABEL,
+    )
+    data = {
+        "mode": VECTORIZER_AI_API_MODE,
+        "output.file_format": OUTPUT_FORMAT,
+        "input.max_pixels": str(VECTORIZER_AI_INPUT_MAX_PIXELS),
+    }
+
+    try:
+        with input_path.open("rb") as image_file:
+            response = requests.post(
+                VECTORIZER_AI_API_URL,
+                files={"image": (input_path.name, image_file, "image/png")},
+                data=data,
+                auth=(VECTORIZER_AI_API_ID, VECTORIZER_AI_API_SECRET),
+                timeout=VECTORIZER_AI_API_TIMEOUT_SECONDS,
+            )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Falha de rede ao chamar a API do Vectorizer.AI: {exc}") from exc
+
+    credits_charged = response.headers.get("X-Credits-Charged")
+    credits_calculated = response.headers.get("X-Credits-Calculated")
+    logger.info(
+        "Vectorizer.AI API: resposta HTTP %s; credits_charged=%s; credits_calculated=%s.",
+        response.status_code,
+        credits_charged or "-",
+        credits_calculated or "-",
+    )
+
+    if response.status_code != requests.codes.ok:
+        detail = compact_log_text(response.text, limit=700)
+        raise RuntimeError(
+            "API do Vectorizer.AI retornou erro "
+            f"HTTP {response.status_code}: {detail or response.reason}"
+        )
+
+    output_path.write_bytes(response.content)
+    logger.info(
+        "Vectorizer.AI API: arquivo salvo em %s (%s bytes).",
+        output_path,
+        output_path.stat().st_size,
+    )
+    validate_vectorizer_ai_download(output_path, output_path.name)
+
+
 def vectorize_with_vectorizer_ai(input_path: Path, output_path: Path) -> None:
     logger.info(
         "Vectorizer.AI: inicio do fluxo remoto com entrada %s e saida %s.",
@@ -2054,7 +2125,8 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     del context
     if VECTORIZATION_PROVIDER != "vectorizer_ai":
         await update.effective_message.reply_text(
-            "O /login so e necessario quando VECTORIZATION_PROVIDER=vectorizer_ai."
+            "O /login so e necessario quando VECTORIZATION_PROVIDER=vectorizer_ai "
+            "(automacao do site)."
         )
         return
 
@@ -2122,8 +2194,13 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await telegram_file.download_to_drive(str(original_path))
             logger.info("Telegram: arquivo baixado para %s.", describe_image_file(original_path))
 
-            if VECTORIZATION_PROVIDER == "vectorizer_ai":
-                await status.edit_text("Enviando para o Vectorizer.AI...")
+            if VECTORIZATION_PROVIDER in {"vectorizer_ai", "vectorizer_ai_api"}:
+                provider_label = (
+                    "API do Vectorizer.AI"
+                    if VECTORIZATION_PROVIDER == "vectorizer_ai_api"
+                    else "Vectorizer.AI"
+                )
+                await status.edit_text(f"Enviando para {provider_label}...")
                 await asyncio.to_thread(
                     prepare_input_image,
                     original_path,
@@ -2134,7 +2211,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "Vectorizer.AI: imagem preparada para upload: %s.",
                     describe_image_file(prepared_path),
                 )
-                await asyncio.to_thread(vectorize_with_vectorizer_ai, prepared_path, output_path)
+                if VECTORIZATION_PROVIDER == "vectorizer_ai_api":
+                    await asyncio.to_thread(
+                        vectorize_with_vectorizer_ai_api,
+                        prepared_path,
+                        output_path,
+                    )
+                else:
+                    await asyncio.to_thread(vectorize_with_vectorizer_ai, prepared_path, output_path)
             else:
                 if OUTPUT_FORMAT not in {"eps", "svg"}:
                     raise RuntimeError(

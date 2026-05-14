@@ -29,13 +29,29 @@ TELEGRAM_BOT_TOKEN=COLE_SEU_TOKEN_REAL_AQUI
 TELEGRAM_MAX_FILE_MB=20
 TELEGRAM_TIMEOUT_SECONDS=180
 OUTPUT_FORMAT=eps
-VECTORIZATION_PROVIDER=vectorizer_ai
+VECTORIZATION_PROVIDER=vectorizer_ai_api
+VECTORIZER_AI_API_ID=COLE_SEU_ID_DA_API_AQUI
+VECTORIZER_AI_API_SECRET=COLE_SEU_SECRET_DA_API_AQUI
+VECTORIZER_AI_API_URL=https://api.vectorizer.ai/api/v1/vectorize
+VECTORIZER_AI_API_MODE=production
+VECTORIZER_AI_API_TIMEOUT_SECONDS=300
+VECTORIZER_AI_INPUT_MAX_PIXELS=3000000
+```
+
+Nao cole aspas. Nao coloque o token no GitHub.
+
+Com `VECTORIZATION_PROVIDER=vectorizer_ai_api`, a Discloud nao precisa abrir navegador para vetorizar. Esse modo usa a API HTTP oficial e evita o erro de WebSocket `-10` que pode acontecer na automacao do site em hospedagem.
+
+## Variaveis opcionais para automacao do site
+
+Use estas somente se voltar para `VECTORIZATION_PROVIDER=vectorizer_ai`:
+
+```env
 VECTORIZER_AI_URL=https://pt.vectorizer.ai/
 VECTORIZER_AI_HEADLESS=true
 VECTORIZER_AI_PROFILE_DIR=.vectorizer-ai-profile
 VECTORIZER_AI_TIMEOUT_SECONDS=300
 VECTORIZER_AI_LOGIN_SECONDS=300
-VECTORIZER_AI_INPUT_MAX_PIXELS=3000000
 VECTORIZER_AI_OFFSCREEN_PROCESSING=false
 VECTORIZER_AI_FINAL_DOWNLOAD_DELAY_SECONDS=0
 VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS=90
@@ -51,11 +67,9 @@ VECTORIZER_AI_COOKIES_JSON=COLE_A_LINHA_EXPORTADA_AQUI
 VECTORIZER_AI_COOKIES_FILE=
 ```
 
-Nao cole aspas. Nao coloque o token no GitHub.
+Se a Discloud nao baixar o Chromium durante o build, `PLAYWRIGHT_AUTO_INSTALL=true` faz o bot baixar automaticamente na primeira tentativa de abrir o navegador. Isso so importa quando `VECTORIZATION_PROVIDER=vectorizer_ai`.
 
-Se a Discloud nao baixar o Chromium durante o build, `PLAYWRIGHT_AUTO_INSTALL=true` faz o bot baixar automaticamente na primeira tentativa de abrir o navegador.
-
-O jeito mais confiavel e usar `VECTORIZER_AI_COOKIES_JSON`, porque ele leva o `VK` e os cookies auxiliares do Vectorizer.AI juntos. Deixe `VECTORIZER_AI_COOKIE_VALUE` vazio quando usar o JSON completo.
+Para automacao do site, o jeito mais confiavel e usar `VECTORIZER_AI_COOKIES_JSON`, porque ele leva o `VK` e os cookies auxiliares do Vectorizer.AI juntos. Deixe `VECTORIZER_AI_COOKIE_VALUE` vazio quando usar o JSON completo.
 
 Para usar todos os cookies do perfil local, rode `python scripts/export_vectorizer_ai_cookies.py` no seu PC com o bot parado. Ele gera `.vectorizer-ai-cookies.env`; cole a linha `VECTORIZER_AI_COOKIES_JSON=...` nas variaveis da Discloud.
 

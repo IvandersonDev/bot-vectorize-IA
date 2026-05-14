@@ -1,6 +1,6 @@
 # Bot Telegram para vetorizar imagens
 
-Este bot recebe uma imagem no Telegram e devolve um arquivo vetorizado. Por padrao ele usa o Vectorizer.AI por automacao de navegador com perfil local persistente; tambem pode usar VTracer local como fallback.
+Este bot recebe uma imagem no Telegram e devolve um arquivo vetorizado. Por padrao ele usa a API HTTP oficial do Vectorizer.AI; tambem pode usar a automacao do site ou VTracer local como fallback.
 
 ## Como configurar
 
@@ -45,9 +45,11 @@ Comandos:
 
 ## Ajustes
 
-O parametro `VECTORIZATION_PROVIDER` no `.env` controla o provedor. Use `vectorizer_ai` para o site ou `local` para VTracer.
+O parametro `VECTORIZATION_PROVIDER` no `.env` controla o provedor. Use `vectorizer_ai_api` para a API oficial do Vectorizer.AI, `vectorizer_ai` para automacao do site ou `local` para VTracer.
 
-O parametro `OUTPUT_FORMAT` no `.env` controla o formato de retorno. Com `vectorizer_ai`, use `eps`, `svg`, `pdf`, `dxf` ou `png`. Com `local`, use `eps` ou `svg`.
+O parametro `OUTPUT_FORMAT` no `.env` controla o formato de retorno. Com `vectorizer_ai_api` ou `vectorizer_ai`, use `eps`, `svg`, `pdf`, `dxf` ou `png`. Com `local`, use `eps` ou `svg`.
+
+Na Discloud, prefira `VECTORIZATION_PROVIDER=vectorizer_ai_api`, porque a automacao do site pode falhar ao conectar no WebSocket de processamento do Vectorizer.AI.
 
 Os parametros `VTRACER_*` no `.env` controlam qualidade, quantidade de detalhes e velocidade. Para logotipos e artes simples, os valores padrao costumam funcionar bem.
 
