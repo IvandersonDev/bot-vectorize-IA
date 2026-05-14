@@ -1,0 +1,52 @@
+# Bot Telegram para vetorizar imagens
+
+Este bot recebe uma imagem no Telegram e devolve um arquivo vetorizado. Por padrao ele usa o Vectorizer.AI por automacao de navegador com perfil local persistente; tambem pode usar VTracer local como fallback.
+
+## Como configurar
+
+1. Crie o bot no Telegram pelo `@BotFather` e copie o token.
+2. Instale as dependencias:
+
+```powershell
+cd C:\Users\Usuario\Downloads\PENAL\telegram-vectorizer-bot
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+3. Crie o arquivo `.env`:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+4. Preencha:
+
+```env
+TELEGRAM_BOT_TOKEN=token_do_botfather
+```
+
+5. Rode o bot:
+
+```powershell
+python bot.py
+```
+
+## Uso
+
+Envie uma imagem para o bot. Para preservar qualidade e transparencia, envie PNG/JPG como arquivo/documento em vez de foto comprimida.
+
+Comandos:
+
+- `/start` inicia o bot.
+- `/help` mostra os ajustes de vetorizacao.
+- `/login` abre o navegador do Vectorizer.AI para fazer login e salvar cookies no perfil local.
+
+## Ajustes
+
+O parametro `VECTORIZATION_PROVIDER` no `.env` controla o provedor. Use `vectorizer_ai` para o site ou `local` para VTracer.
+
+O parametro `OUTPUT_FORMAT` no `.env` controla o formato de retorno. Com `vectorizer_ai`, use `eps`, `svg`, `pdf`, `dxf` ou `png`. Com `local`, use `eps` ou `svg`.
+
+Os parametros `VTRACER_*` no `.env` controlam qualidade, quantidade de detalhes e velocidade. Para logotipos e artes simples, os valores padrao costumam funcionar bem.
