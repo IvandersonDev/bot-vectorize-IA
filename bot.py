@@ -118,6 +118,7 @@ VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS = env_float(
     "VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS",
     90.0,
 )
+VECTORIZER_AI_VERBOSE_LOGS = env_bool("VECTORIZER_AI_VERBOSE_LOGS", True)
 PLAYWRIGHT_AUTO_INSTALL = env_bool("PLAYWRIGHT_AUTO_INSTALL", True)
 VECTORIZER_AI_COOKIE_NAME = os.getenv("VECTORIZER_AI_COOKIE_NAME", "VK").strip() or "VK"
 VECTORIZER_AI_COOKIE_VALUE = os.getenv("VECTORIZER_AI_COOKIE_VALUE", "").strip()
@@ -199,6 +200,19 @@ def vectorize_image(input_path: Path, output_path: Path) -> None:
         splice_threshold=VTRACER_SPLICE_THRESHOLD,
         path_precision=VTRACER_PATH_PRECISION,
     )
+
+
+def describe_image_file(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    try:
+        with Image.open(path) as image:
+            return f"{path.name} ({image.width}x{image.height}px, {size} bytes)"
+    except Exception:
+        return f"{path.name} ({size} bytes)"
 
 
 def parse_svg_number(value: str | None) -> float:
@@ -537,6 +551,24 @@ def launch_vectorizer_ai_context(playwright, *, login: bool = False):
         "args": args,
     }
 
+    logger.info(
+        "Vectorizer.AI: abrindo Chromium (headless=%s, login=%s, perfil=%s, url=%s).",
+        VECTORIZER_AI_HEADLESS,
+        login,
+        VECTORIZER_AI_PROFILE_DIR,
+        VECTORIZER_AI_URL,
+    )
+    if VECTORIZER_AI_VERBOSE_LOGS:
+        logger.info(
+            "Vectorizer.AI: timeouts result=%.1fs, login=%.1fs, "
+            "download_link=%.1fs, direct_download=%.1fs; output=%s.",
+            VECTORIZER_AI_TIMEOUT_SECONDS,
+            VECTORIZER_AI_LOGIN_SECONDS,
+            VECTORIZER_AI_DOWNLOAD_LINK_TIMEOUT_SECONDS,
+            VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS,
+            OUTPUT_LABEL,
+        )
+
     try:
         return playwright.chromium.launch_persistent_context(**context_options)
     except PlaywrightError as exc:
@@ -553,16 +585,102 @@ def save_vectorizer_ai_debug(page, prefix: str) -> None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe_prefix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", prefix).strip("-") or "debug"
     base_path = debug_dir / f"{stamp}-{safe_prefix}"
+    html_path = base_path.with_suffix(".html")
+    screenshot_path = base_path.with_suffix(".png")
 
     try:
-        (base_path.with_suffix(".html")).write_text(page.content(), encoding="utf-8")
+        html_path.write_text(page.content(), encoding="utf-8")
+        logger.info("Debug Vectorizer.AI salvo: %s", html_path)
     except Exception:
         logger.exception("Nao consegui salvar HTML de debug do Vectorizer.AI.")
 
     try:
-        page.screenshot(path=str(base_path.with_suffix(".png")), full_page=True)
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        logger.info("Screenshot Vectorizer.AI salvo: %s", screenshot_path)
     except Exception:
         logger.exception("Nao consegui salvar screenshot de debug do Vectorizer.AI.")
+
+
+def log_vectorizer_ai_state(page, stage: str) -> None:
+    if not VECTORIZER_AI_VERBOSE_LOGS:
+        return
+
+    try:
+        if page.is_closed():
+            logger.info("Vectorizer.AI[%s]: pagina fechada.", stage)
+            return
+    except PlaywrightError:
+        logger.info("Vectorizer.AI[%s]: nao consegui ler estado da pagina.", stage)
+        return
+
+    try:
+        page_count = len(page.context.pages)
+    except PlaywrightError:
+        page_count = -1
+
+    try:
+        url = page.url
+    except PlaywrightError:
+        url = "<sem-url>"
+
+    try:
+        title = page.title()
+    except PlaywrightError:
+        title = "<sem-title>"
+
+    download_count = 0
+    download_visible = False
+    download_href = None
+    try:
+        download_link = page.locator("#App-DownloadLink")
+        download_count = download_link.count()
+        if download_count > 0:
+            first_download = download_link.first
+            download_visible = first_download.is_visible(timeout=500)
+            download_href = first_download.get_attribute("href", timeout=500)
+    except PlaywrightError:
+        pass
+
+    href_state = "ausente"
+    if download_href:
+        href_state = "tokenizado" if normalize_vectorizer_ai_download_url(page, download_href) else download_href[:80]
+
+    file_inputs = 0
+    try:
+        file_inputs = page.locator('input[type="file"]').count()
+    except PlaywrightError:
+        pass
+
+    markers = []
+    try:
+        body_text = page.locator("body").inner_text(timeout=1_000)
+        marker_checks = [
+            ("login", "Fazer login" in body_text or "Login" in body_text),
+            ("criar-conta", "Criar conta" in body_text),
+            ("download", "DOWNLOAD" in body_text or "Download" in body_text),
+            ("formato", "File Format" in body_text or "Formato" in body_text),
+            (OUTPUT_LABEL, OUTPUT_LABEL in body_text),
+            ("erro-rede", "Erro de rede" in body_text or "Network Error" in body_text),
+            ("muitas-solicitacoes", "Muitas solicita" in body_text or "Too many" in body_text),
+            ("bem-vindo", "Welcome" in body_text or "Bem-vindo" in body_text),
+        ]
+        markers = [name for name, present in marker_checks if present]
+    except PlaywrightError:
+        markers = ["body-indisponivel"]
+
+    logger.info(
+        "Vectorizer.AI[%s]: url=%s | titulo=%s | paginas=%s | "
+        "file_inputs=%s | download_link=%s visivel=%s href=%s | marcadores=%s",
+        stage,
+        url,
+        title,
+        page_count,
+        file_inputs,
+        download_count,
+        download_visible,
+        href_state,
+        ",".join(markers) if markers else "-",
+    )
 
 
 def is_playwright_target_closed(error: Exception) -> bool:
@@ -724,7 +842,11 @@ def apply_vectorizer_ai_cookies(context) -> None:
 
     context.add_cookies(cookies)
     cookie_names = ", ".join(cookie["name"] for cookie in cookies)
-    logger.info("Cookies do Vectorizer.AI aplicados via ambiente: %s.", cookie_names)
+    logger.info(
+        "Cookies do Vectorizer.AI aplicados via ambiente (%s): %s.",
+        len(cookies),
+        cookie_names,
+    )
 
 
 def has_visible_vectorizer_ai_download(page) -> bool:
@@ -770,9 +892,20 @@ def wait_for_vectorizer_ai_result(page) -> None:
     download_button_without_href_logged = False
     download_link_deadline = None
     setattr(page, "_vectorizer_ai_download_link_waited", False)
+    last_logged_url = None
+    next_wait_log = time.monotonic() + 10.0
 
     while time.monotonic() < deadline:
         now = time.monotonic()
+        if VECTORIZER_AI_VERBOSE_LOGS:
+            try:
+                current_url = page.url
+            except PlaywrightError:
+                current_url = "<sem-url>"
+            if current_url != last_logged_url:
+                last_logged_url = current_url
+                logger.info("Vectorizer.AI: URL atual durante processamento: %s", current_url)
+
         download_button_visible = has_visible_vectorizer_ai_download(page)
         if download_button_visible:
             if download_link_deadline is None:
@@ -793,6 +926,7 @@ def wait_for_vectorizer_ai_result(page) -> None:
                 logger.info(
                     "Botao Download visivel, aguardando href tokenizado antes de clicar."
                 )
+                log_vectorizer_ai_state(page, "botao-download-visivel-sem-href")
 
             if now >= download_link_deadline:
                 save_vectorizer_ai_debug(page, "download-link-timeout")
@@ -804,6 +938,10 @@ def wait_for_vectorizer_ai_result(page) -> None:
                 return
         else:
             download_link_deadline = None
+
+        if VECTORIZER_AI_VERBOSE_LOGS and now >= next_wait_log:
+            next_wait_log = now + 10.0
+            log_vectorizer_ai_state(page, "aguardando-resultado")
 
         body_text = ""
         if now >= next_error_check:
@@ -844,6 +982,7 @@ def wait_for_vectorizer_ai_result(page) -> None:
 
 
 def select_vectorizer_ai_format(page, output_format: str) -> bool:
+    logger.info("Vectorizer.AI: tentando selecionar formato %s.", output_format.upper())
     try:
         if page.evaluate(
             """
@@ -875,9 +1014,13 @@ def select_vectorizer_ai_format(page, output_format: str) -> bool:
             """,
             output_format,
         ):
+            logger.info(
+                "Vectorizer.AI: formato %s selecionado por script inicial.",
+                output_format.upper(),
+            )
             return True
     except PlaywrightError:
-        pass
+        logger.info("Vectorizer.AI: script inicial nao conseguiu selecionar formato.")
 
     title_format = output_format.capitalize()
     upper_format = output_format.upper()
@@ -921,12 +1064,17 @@ def select_vectorizer_ai_format(page, output_format: str) -> bool:
                 if not target.is_visible():
                     continue
                 target.click()
+            logger.info(
+                "Vectorizer.AI: formato %s selecionado com seletor %s.",
+                output_format.upper(),
+                selector,
+            )
             return True
         except Exception:
             continue
 
     try:
-        return bool(
+        selected = bool(
             page.evaluate(
                 """
                 (format) => {
@@ -984,7 +1132,14 @@ def select_vectorizer_ai_format(page, output_format: str) -> bool:
                 output_format,
             )
         )
+        logger.info(
+            "Vectorizer.AI: selecao final de formato %s retornou %s.",
+            output_format.upper(),
+            selected,
+        )
+        return selected
     except PlaywrightError:
+        logger.info("Vectorizer.AI: selecao final de formato falhou.")
         return False
 
 
@@ -1073,8 +1228,16 @@ def wait_for_vectorizer_ai_download_event(page, timeout_seconds: float):
 
 def wait_for_vectorizer_ai_download_options(page, timeout_ms: int = 15_000) -> bool:
     deadline = time.monotonic() + (timeout_ms / 1000)
+    should_log = VECTORIZER_AI_VERBOSE_LOGS and timeout_ms >= 1_000
+    if should_log:
+        logger.info(
+            "Vectorizer.AI: aguardando tela de formatos por %.1fs.",
+            timeout_ms / 1000,
+        )
     while time.monotonic() < deadline:
         if page.is_closed():
+            if should_log:
+                logger.info("Vectorizer.AI: pagina fechou enquanto aguardava tela de formatos.")
             return False
 
         try:
@@ -1084,13 +1247,30 @@ def wait_for_vectorizer_ai_download_options(page, timeout_ms: int = 15_000) -> b
                 or "Formato" in body_text
                 or "SVG Options" in body_text
             ):
+                if should_log:
+                    logger.info("Vectorizer.AI: tela de formatos encontrada por texto.")
                 return True
 
             if page.locator(f"label:has-text('{OUTPUT_LABEL}')").count() > 0:
+                if should_log:
+                    logger.info(
+                        "Vectorizer.AI: tela de formatos encontrada por label %s.",
+                        OUTPUT_LABEL,
+                    )
                 return True
             if page.locator(f"input[value='{OUTPUT_FORMAT}']").count() > 0:
+                if should_log:
+                    logger.info(
+                        "Vectorizer.AI: tela de formatos encontrada por input %s.",
+                        OUTPUT_FORMAT,
+                    )
                 return True
             if page.locator(f"input[value='{OUTPUT_LABEL}']").count() > 0:
+                if should_log:
+                    logger.info(
+                        "Vectorizer.AI: tela de formatos encontrada por input %s.",
+                        OUTPUT_LABEL,
+                    )
                 return True
         except PlaywrightError:
             pass
@@ -1102,13 +1282,21 @@ def wait_for_vectorizer_ai_download_options(page, timeout_ms: int = 15_000) -> b
 
 def find_vectorizer_ai_download_options_page(page, timeout_ms: int = 15_000):
     deadline = time.monotonic() + (timeout_ms / 1000)
+    if VECTORIZER_AI_VERBOSE_LOGS:
+        logger.info(
+            "Vectorizer.AI: procurando tela de formatos entre abas por %.1fs.",
+            timeout_ms / 1000,
+        )
     while time.monotonic() < deadline:
         pages = list(page.context.pages)
+        if VECTORIZER_AI_VERBOSE_LOGS:
+            logger.info("Vectorizer.AI: abas abertas na procura de formatos: %s.", len(pages))
         for candidate in reversed(pages):
             try:
                 if candidate.is_closed():
                     continue
                 if wait_for_vectorizer_ai_download_options(candidate, timeout_ms=500):
+                    log_vectorizer_ai_state(candidate, "tela-formatos-encontrada")
                     return candidate
             except PlaywrightError:
                 continue
@@ -1125,18 +1313,35 @@ def click_locator_like_user(page, locator, timeout: int = 3_000) -> None:
     if box:
         x = box["x"] + box["width"] / 2
         y = box["y"] + box["height"] / 2
+        if VECTORIZER_AI_VERBOSE_LOGS:
+            logger.info(
+                "Vectorizer.AI: clique por coordenadas em x=%.1f y=%.1f "
+                "(w=%.1f h=%.1f).",
+                x,
+                y,
+                box["width"],
+                box["height"],
+            )
         page.mouse.move(x, y)
         page.wait_for_timeout(100)
         page.mouse.click(x, y)
         return
 
+    if VECTORIZER_AI_VERBOSE_LOGS:
+        logger.info("Vectorizer.AI: clique via locator.click sem bounding box.")
     locator.click(timeout=timeout)
 
 
 def first_download_wait(page, pages_before, downloads, timeout_seconds: float):
     deadline = time.monotonic() + timeout_seconds
+    if VECTORIZER_AI_VERBOSE_LOGS:
+        logger.info(
+            "Vectorizer.AI: aguardando evento de download ou tela de formatos por %.1fs.",
+            timeout_seconds,
+        )
     while time.monotonic() < deadline:
         if downloads:
+            logger.info("Vectorizer.AI: evento de download detectado.")
             return page, downloads[0]
 
         for candidate in reversed(page.context.pages):
@@ -1149,6 +1354,9 @@ def first_download_wait(page, pages_before, downloads, timeout_seconds: float):
                     except PlaywrightError:
                         pass
                 if wait_for_vectorizer_ai_download_options(candidate, timeout_ms=500):
+                    logger.info(
+                        "Vectorizer.AI: tela de formatos detectada apos primeiro clique."
+                    )
                     return candidate, None
             except PlaywrightError:
                 continue
@@ -1237,10 +1445,23 @@ def get_vectorizer_ai_download_url(page, locator=None) -> str | None:
 
 def wait_for_vectorizer_ai_download_url(page, locator=None, timeout_ms: int = 10_000) -> str | None:
     deadline = time.monotonic() + (timeout_ms / 1000)
+    next_log = time.monotonic()
     while time.monotonic() < deadline:
         download_url = get_vectorizer_ai_download_url(page, locator)
         if download_url:
+            logger.info("Vectorizer.AI: href tokenizado encontrado: %s", download_url)
             return download_url
+        now = time.monotonic()
+        if VECTORIZER_AI_VERBOSE_LOGS and now >= next_log:
+            next_log = now + 10.0
+            try:
+                href = locator.get_attribute("href", timeout=500) if locator else None
+            except PlaywrightError:
+                href = None
+            logger.info(
+                "Vectorizer.AI: ainda sem href tokenizado (href atual=%s).",
+                (href[:80] if href else "ausente"),
+            )
         page.wait_for_timeout(250)
 
     return None
@@ -1288,6 +1509,10 @@ def open_vectorizer_ai_download_href(page, locator, pages_before, downloads):
 def click_vectorizer_ai_result_download(page, locator):
     pages_before = set(page.context.pages)
     downloads = []
+    logger.info(
+        "Vectorizer.AI: preparando primeiro Download (abas antes=%s).",
+        len(pages_before),
+    )
 
     def on_download(download):
         downloads.append(download)
@@ -1315,7 +1540,9 @@ def click_vectorizer_ai_result_download(page, locator):
                     return resolved_page or page, download
 
         logger.info("Href tokenizado nao apareceu; tentando clique normal no Download.")
+        log_vectorizer_ai_state(page, "antes-clique-primeiro-download")
         click_locator_like_user(page, locator, timeout=3_000)
+        log_vectorizer_ai_state(page, "depois-clique-primeiro-download")
         resolved_page, download = first_download_wait(
             page,
             pages_before,
@@ -1375,6 +1602,12 @@ def click_vectorizer_ai_final_download(page):
         count = locator.count()
         if count == 0:
             continue
+        if VECTORIZER_AI_VERBOSE_LOGS:
+            logger.info(
+                "Vectorizer.AI: seletor de Download final encontrou %s elemento(s): %s",
+                count,
+                selector,
+            )
 
         for index in range(count - 1, max(count - 4, -1), -1):
             target = locator.nth(index)
@@ -1417,15 +1650,19 @@ def click_vectorizer_ai_final_download(page):
 
 def download_from_vectorizer_ai_after_format_choice(page, output_path: Path) -> str:
     download_link = page.locator("#App-DownloadLink").first
+    logger.info("Vectorizer.AI: aguardando botao Download do resultado.")
     download_link.wait_for(state="visible", timeout=30_000)
     dismiss_vectorizer_ai_blocking_dialogs(page)
+    log_vectorizer_ai_state(page, "antes-primeiro-download")
 
     # O site normalmente abre as opcoes de exportacao so depois do primeiro clique.
     page, download = click_vectorizer_ai_result_download(page, download_link)
+    log_vectorizer_ai_state(page, "apos-primeiro-download")
     if download is None:
         options_page = find_vectorizer_ai_download_options_page(page, timeout_ms=1_500)
         if options_page is not None:
             page = options_page
+            logger.info("Vectorizer.AI: usando aba/pagina de opcoes de formato.")
         options_ready = wait_for_vectorizer_ai_download_options(page, timeout_ms=1_000)
         page.wait_for_timeout(100)
         selected = select_vectorizer_ai_format(page, OUTPUT_FORMAT)
@@ -1445,6 +1682,7 @@ def download_from_vectorizer_ai_after_format_choice(page, output_path: Path) -> 
         if "Fazer login" in body_text and "Criar conta" in body_text:
             logger.info("Vectorizer.AI abriu fluxo de login/compra antes do download.")
 
+        log_vectorizer_ai_state(page, "antes-download-final")
         download = click_vectorizer_ai_final_download(page)
         candidate_selectors = [] if download is not None else [
             "button.btn-primary:has-text('DOWNLOAD')",
@@ -1503,12 +1741,27 @@ def download_from_vectorizer_ai_after_format_choice(page, output_path: Path) -> 
 
     suggested_filename = download.suggested_filename or output_path.name
     temp_download_path = output_path.with_name(output_path.name + ".download")
+    logger.info(
+        "Vectorizer.AI: download recebido (nome sugerido=%s). Salvando em %s.",
+        suggested_filename,
+        temp_download_path,
+    )
     download.save_as(str(temp_download_path))
     temp_download_path.replace(output_path)
+    logger.info(
+        "Vectorizer.AI: arquivo final salvo em %s (%s bytes).",
+        output_path,
+        output_path.stat().st_size,
+    )
     return suggested_filename
 
 
 def validate_vectorizer_ai_download(output_path: Path, suggested_filename: str) -> None:
+    logger.info(
+        "Vectorizer.AI: validando download %s (nome sugerido=%s).",
+        output_path,
+        suggested_filename,
+    )
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError("O download do Vectorizer.AI veio vazio.")
 
@@ -1536,24 +1789,38 @@ def validate_vectorizer_ai_download(output_path: Path, suggested_filename: str) 
 
 
 def vectorize_with_vectorizer_ai(input_path: Path, output_path: Path) -> None:
+    logger.info(
+        "Vectorizer.AI: inicio do fluxo remoto com entrada %s e saida %s.",
+        describe_image_file(input_path),
+        output_path.name,
+    )
     with VECTORIZER_AI_LOCK:
+        logger.info("Vectorizer.AI: lock adquirido; iniciando Playwright.")
         with sync_playwright() as playwright:
             context = launch_vectorizer_ai_context(playwright)
             try:
                 apply_vectorizer_ai_cookies(context)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(30_000)
+                logger.info("Vectorizer.AI: abrindo site %s.", VECTORIZER_AI_URL)
                 page.goto(VECTORIZER_AI_URL, wait_until="domcontentloaded", timeout=60_000)
+                log_vectorizer_ai_state(page, "site-aberto")
 
                 file_input = page.locator('input[type="file"]').first
+                logger.info("Vectorizer.AI: procurando input de arquivo para upload.")
+                file_input.wait_for(state="attached", timeout=30_000)
+                logger.info("Vectorizer.AI: enviando imagem para o input de arquivo.")
                 file_input.set_input_files(str(input_path))
+                log_vectorizer_ai_state(page, "apos-upload")
 
                 wait_for_vectorizer_ai_result(page)
+                log_vectorizer_ai_state(page, "resultado-pronto")
                 suggested_filename = download_from_vectorizer_ai_after_format_choice(
                     page,
                     output_path,
                 )
                 validate_vectorizer_ai_download(output_path, suggested_filename)
+                logger.info("Vectorizer.AI: validacao do arquivo baixado concluida.")
             except PlaywrightError as exc:
                 if is_playwright_target_closed(exc):
                     raise RuntimeError(
@@ -1573,6 +1840,7 @@ def vectorize_with_vectorizer_ai(input_path: Path, output_path: Path) -> None:
                     pass
                 raise
             finally:
+                logger.info("Vectorizer.AI: fechando contexto do navegador.")
                 context.close()
 
 
@@ -1661,6 +1929,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text("Envie uma imagem para vetorizar.")
         return
 
+    logger.info(
+        "Telegram: imagem recebida no chat %s (tipo=%s, tamanho=%s bytes, sufixo=%s).",
+        message.chat_id,
+        "documento" if document else "foto",
+        file_size,
+        suffix,
+    )
+
     if file_size and file_size > MAX_FILE_BYTES:
         await message.reply_text(
             f"Arquivo muito grande. O limite configurado e {TELEGRAM_MAX_FILE_MB} MB."
@@ -1683,6 +1959,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             telegram_file = await context.bot.get_file(file_id)
             await telegram_file.download_to_drive(str(original_path))
+            logger.info("Telegram: arquivo baixado para %s.", describe_image_file(original_path))
 
             if VECTORIZATION_PROVIDER == "vectorizer_ai":
                 await status.edit_text("Enviando para o Vectorizer.AI...")
@@ -1692,6 +1969,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     prepared_path,
                     VECTORIZER_AI_INPUT_MAX_PIXELS,
                 )
+                logger.info(
+                    "Vectorizer.AI: imagem preparada para upload: %s.",
+                    describe_image_file(prepared_path),
+                )
                 await asyncio.to_thread(vectorize_with_vectorizer_ai, prepared_path, output_path)
             else:
                 if OUTPUT_FORMAT not in {"eps", "svg"}:
@@ -1700,6 +1981,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
 
                 await asyncio.to_thread(prepare_input_image, original_path, prepared_path)
+                logger.info("Local: imagem preparada: %s.", describe_image_file(prepared_path))
                 await asyncio.to_thread(vectorize_image, prepared_path, svg_path)
                 if OUTPUT_FORMAT == "eps":
                     await asyncio.to_thread(convert_svg_to_eps, svg_path, output_path)
