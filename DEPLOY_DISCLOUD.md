@@ -39,9 +39,12 @@ VECTORIZER_AI_INPUT_MAX_PIXELS=3000000
 VECTORIZER_AI_OFFSCREEN_PROCESSING=false
 VECTORIZER_AI_FINAL_DOWNLOAD_DELAY_SECONDS=0
 VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS=90
+PLAYWRIGHT_AUTO_INSTALL=true
 ```
 
 Nao cole aspas. Nao coloque o token no GitHub.
+
+Se a Discloud nao baixar o Chromium durante o build, `PLAYWRIGHT_AUTO_INSTALL=true` faz o bot baixar automaticamente na primeira tentativa de abrir o navegador.
 
 ## Limitacao importante
 

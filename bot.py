@@ -4,6 +4,8 @@ import math
 import mimetypes
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -111,6 +113,7 @@ VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS = env_float(
     "VECTORIZER_AI_DIRECT_DOWNLOAD_TIMEOUT_SECONDS",
     90.0,
 )
+PLAYWRIGHT_AUTO_INSTALL = env_bool("PLAYWRIGHT_AUTO_INSTALL", True)
 VECTORIZER_AI_LOCK = threading.Lock()
 
 VTRACER_INPUT_MAX_PIXELS = env_int("VTRACER_INPUT_MAX_PIXELS", 6_000_000)
@@ -507,14 +510,23 @@ def launch_vectorizer_ai_context(playwright, *, login: bool = False):
     if not login and VECTORIZER_AI_OFFSCREEN_PROCESSING and not VECTORIZER_AI_HEADLESS:
         args.extend(["--window-position=-32000,-32000", "--window-size=1280,900"])
 
-    return playwright.chromium.launch_persistent_context(
-        user_data_dir=str(VECTORIZER_AI_PROFILE_DIR),
-        headless=VECTORIZER_AI_HEADLESS,
-        accept_downloads=True,
-        viewport={"width": 1280, "height": 900},
-        locale="pt-BR",
-        args=args,
-    )
+    context_options = {
+        "user_data_dir": str(VECTORIZER_AI_PROFILE_DIR),
+        "headless": VECTORIZER_AI_HEADLESS,
+        "accept_downloads": True,
+        "viewport": {"width": 1280, "height": 900},
+        "locale": "pt-BR",
+        "args": args,
+    }
+
+    try:
+        return playwright.chromium.launch_persistent_context(**context_options)
+    except PlaywrightError as exc:
+        if not PLAYWRIGHT_AUTO_INSTALL or not is_playwright_browser_missing(exc):
+            raise
+
+        install_playwright_chromium()
+        return playwright.chromium.launch_persistent_context(**context_options)
 
 
 def save_vectorizer_ai_debug(page, prefix: str) -> None:
@@ -538,6 +550,38 @@ def save_vectorizer_ai_debug(page, prefix: str) -> None:
 def is_playwright_target_closed(error: Exception) -> bool:
     message = str(error).lower()
     return "target page" in message and "closed" in message
+
+
+def is_playwright_browser_missing(error: Exception) -> bool:
+    message = str(error).lower()
+    return "executable doesn't exist" in message and "playwright install" in message
+
+
+def install_playwright_chromium() -> None:
+    logger.info("Chromium do Playwright nao encontrado; instalando navegador.")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            cwd=str(BASE_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=600,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Nao consegui executar 'python -m playwright install chromium' "
+            "no ambiente de hospedagem."
+        ) from exc
+
+    if result.returncode != 0:
+        output = (result.stdout or "").strip()
+        raise RuntimeError(
+            "Nao consegui instalar o Chromium do Playwright. "
+            f"Saida: {output[-1000:]}"
+        )
+
+    logger.info("Chromium do Playwright instalado.")
 
 
 def has_visible_vectorizer_ai_download(page) -> bool:
