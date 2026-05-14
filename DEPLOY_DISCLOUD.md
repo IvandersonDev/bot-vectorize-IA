@@ -10,7 +10,7 @@ O arquivo `discloud.config` fica na raiz do projeto, como a Discloud exige:
 NAME=bot-vectorize-IA
 TYPE=bot
 MAIN=bot.py
-RAM=2048
+RAM=1024
 VERSION=latest
 AUTORESTART=true
 APT=tools, puppeteer
